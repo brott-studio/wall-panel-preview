@@ -67,8 +67,25 @@
       <button id="modeBoxes">Adjust boxes</button>
       <button id="addBox">Add box</button>
       <button id="delBox">Delete box</button>
+      <button id="modeMask">Furniture</button>
       <button id="toggleOutline">Hide outline</button>
+      <button id="toggleMeasure">Show measurements</button>
       <button id="save">Save image</button>
+    </div>
+    <div id="maskTools" style="display:none">
+      <div class="modes">
+        <button id="toolBrush" class="on">Brush</button>
+        <button id="toolShape">Outline shape</button>
+        <span style="display:inline-block;width:10px"></span>
+        <button id="actHide" class="on">Hide panels</button>
+        <button id="actShow">Bring panels back</button>
+      </div>
+      <div class="modes">
+        <label style="display:inline-flex">Brush size <input type="range" id="brush" min="5" max="200" value="40"></label>
+        <button id="finishShape">Finish shape</button>
+        <button id="undoMask">Undo</button>
+        <button id="clearMask">Clear all</button>
+      </div>
     </div>
     <div class="hint" id="help">Drag the four round handles onto the corners of the wall. If a corner is hidden, line the handle up with where the two edges would meet.</div>
     <canvas id="cv" width="1000" height="700"></canvas>
@@ -90,6 +107,10 @@
   let selected = -1;
   let drag = null;
   let H = null, Hinv = null;
+  let showMeasure = false;
+  let mask = null, mctx = null;            // furniture mask, image px, opaque = panels hidden
+  const layer = document.createElement('canvas'), lctx = layer.getContext('2d');
+  let tool = 'brush', act = 'hide', shape = [], hover = null, undo = [];
 
   // ---------- homography ----------
   function solve(A, b) {
@@ -166,11 +187,22 @@
   }
 
   // ---------- drawing ----------
-  function quad(x0, y0, x1, y1) {
+  function quad(x0, y0, x1, y1, g) {
+    g = g || ctx;
     const p = [toImg(x0, y0), toImg(x1, y0), toImg(x1, y1), toImg(x0, y1)];
-    ctx.moveTo(p[0][0], p[0][1]);
-    for (let i = 1; i < 4; i++) ctx.lineTo(p[i][0], p[i][1]);
-    ctx.closePath();
+    g.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < 4; i++) g.lineTo(p[i][0], p[i][1]);
+    g.closePath();
+  }
+  // draw an offscreen layer onto the photo with the furniture cut out of it
+  function compositeLayer(op, alpha) {
+    lctx.save();
+    lctx.globalCompositeOperation = 'destination-out';
+    lctx.filter = 'blur(' + Math.max(1, img.width / 1200) + 'px)';
+    lctx.drawImage(mask, 0, 0);
+    lctx.restore();
+    ctx.save(); ctx.globalCompositeOperation = op; ctx.globalAlpha = alpha;
+    ctx.drawImage(layer, 0, 0); ctx.restore();
   }
   function scaleFactor() { return cv.width / cv.getBoundingClientRect().width; }
 
@@ -186,26 +218,31 @@
     const s = scaleFactor();
 
     if ($('paint').checked) {
-      ctx.save();
-      ctx.globalAlpha = 0.55; ctx.globalCompositeOperation = 'multiply';
-      ctx.fillStyle = $('wallColor').value;
-      ctx.beginPath(); quad(0, 0, W(), Ht()); ctx.fill();
-      ctx.restore();
+      lctx.clearRect(0, 0, layer.width, layer.height);
+      lctx.fillStyle = $('wallColor').value;
+      lctx.beginPath(); quad(0, 0, W(), Ht(), lctx); lctx.fill();
+      compositeLayer('multiply', 0.55);
     }
 
     const mw = Math.max(0.05, num('mould'));
-    boxes.forEach((b, i) => {
+    lctx.clearRect(0, 0, layer.width, layer.height);
+    boxes.forEach(b => {
       // shadow under moulding for a bit of depth
-      ctx.save();
-      ctx.beginPath();
-      quad(b.x, b.y, b.x + b.w, b.y + b.h);
-      quad(b.x + mw, b.y + mw, b.x + b.w - mw, b.y + b.h - mw);
-      ctx.shadowColor = 'rgba(0,0,0,0.35)';
-      ctx.shadowBlur = 4 * Math.max(1, img.width / 1500);
-      ctx.shadowOffsetY = 2 * Math.max(1, img.width / 1500);
-      ctx.fillStyle = $('color').value;
-      ctx.fill('evenodd');
-      ctx.restore();
+      lctx.save();
+      lctx.beginPath();
+      quad(b.x, b.y, b.x + b.w, b.y + b.h, lctx);
+      quad(b.x + mw, b.y + mw, b.x + b.w - mw, b.y + b.h - mw, lctx);
+      lctx.shadowColor = 'rgba(0,0,0,0.35)';
+      lctx.shadowBlur = 4 * Math.max(1, img.width / 1500);
+      lctx.shadowOffsetY = 2 * Math.max(1, img.width / 1500);
+      lctx.fillStyle = $('color').value;
+      lctx.fill('evenodd');
+      lctx.restore();
+    });
+    compositeLayer('source-over', 1);
+
+    if (showMeasure) drawMeasurements(mw);
+    boxes.forEach((b, i) => {
       if (!forExport && mode === 'boxes' && i === selected) {
         ctx.save();
         ctx.strokeStyle = '#e0533d'; ctx.lineWidth = 3 * s;
@@ -221,6 +258,25 @@
       ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 2 * s; ctx.setLineDash([10 * s, 6 * s]);
       ctx.beginPath(); quad(0, 0, W(), Ht()); ctx.stroke();
       ctx.restore();
+    }
+    if (mode === 'mask') {
+      lctx.clearRect(0, 0, layer.width, layer.height);
+      lctx.drawImage(mask, 0, 0);
+      lctx.save(); lctx.globalCompositeOperation = 'source-in';
+      lctx.fillStyle = '#e0533d'; lctx.fillRect(0, 0, layer.width, layer.height); lctx.restore();
+      ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(layer, 0, 0); ctx.restore();
+      if (shape.length) {
+        ctx.save(); ctx.strokeStyle = '#e0533d'; ctx.lineWidth = 3 * s; ctx.setLineDash([8 * s, 5 * s]);
+        ctx.beginPath(); shape.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+        if (hover) ctx.lineTo(hover[0], hover[1]);
+        ctx.stroke(); ctx.setLineDash([]);
+        shape.forEach(([x, y], i) => { ctx.beginPath(); ctx.arc(x, y, (i ? 5 : 9) * s, 0, Math.PI * 2); ctx.fillStyle = i ? '#e0533d' : '#fff'; ctx.fill(); ctx.stroke(); });
+        ctx.restore();
+      }
+      if (tool === 'brush' && hover) {
+        ctx.save(); ctx.beginPath(); ctx.arc(hover[0], hover[1], brushR(), 0, Math.PI * 2);
+        ctx.lineWidth = 2 * s; ctx.strokeStyle = act === 'hide' ? '#e0533d' : '#fff'; ctx.stroke(); ctx.restore();
+      }
     }
     if (mode === 'corners') {
       corners.forEach(([x, y], i) => {
@@ -240,6 +296,58 @@
     showSel();
   }
 
+  function len(v) {
+    if ($('units').value === 'cm') return (Math.round(v * 10) / 10) + ' cm';
+    const q = Math.round(v * 4), whole = Math.floor(q / 4), f = ['', '¼', '½', '¾'][q % 4];
+    return (whole || !f ? whole : '') + f + '"';
+  }
+  // label centred on an image-space edge, pushed along its normal (towards point `away` if out < 0)
+  function edgeLabel(a, b, ref, out, text, dark, fs) {
+    const s = scaleFactor();
+    const pa = toImg(a[0], a[1]), pb = toImg(b[0], b[1]), pr = toImg(ref[0], ref[1]);
+    const mx = (pa[0] + pb[0]) / 2, my = (pa[1] + pb[1]) / 2;
+    let nx = -(pb[1] - pa[1]), ny = pb[0] - pa[0];
+    const nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
+    if ((pr[0] - mx) * nx + (pr[1] - my) * ny > 0) { nx = -nx; ny = -ny; } // point away from ref
+    fs = Math.max(fs, 12 * s);            // stay readable on small screens
+    const off = out * fs * 0.85;
+    const lx = mx + nx * off, ly = my + ny * off;
+    if (mask && lx >= 0 && ly >= 0 && lx < mask.width && ly < mask.height &&
+        mctx.getImageData(Math.floor(lx), Math.floor(ly), 1, 1).data[3] > 128) return; // behind furniture
+    let ang = Math.atan2(pb[1] - pa[1], pb[0] - pa[0]);
+    if (ang > Math.PI / 2) ang -= Math.PI; if (ang < -Math.PI / 2) ang += Math.PI;
+    ctx.save();
+    ctx.translate(lx, ly); ctx.rotate(ang);
+    ctx.font = fs + 'px Georgia, serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const tw = ctx.measureText(text).width, pad = fs * 0.3;
+    ctx.fillStyle = dark ? 'rgba(40,40,40,0.85)' : 'rgba(255,240,170,0.92)';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-tw / 2 - pad, -fs * 0.62, tw + 2 * pad, fs * 1.24, fs * 0.3);
+    else ctx.rect(-tw / 2 - pad, -fs * 0.62, tw + 2 * pad, fs * 1.24);
+    ctx.fill();
+    ctx.fillStyle = dark ? '#fff' : '#222'; ctx.fillText(text, 0, 0);
+    ctx.restore();
+  }
+  function drawMeasurements(mw) {
+    const base = Math.max(12, Math.min(img.width, img.height) / 45);
+    // whole wall
+    const wc = [W() / 2, Ht() / 2];
+    edgeLabel([0, 0], [W(), 0], wc, 2.4, 'Wall ' + len(W()), true, base * 1.1);
+    edgeLabel([0, 0], [0, Ht()], wc, 2.4, 'Wall ' + len(Ht()), true, base * 1.1);
+    boxes.forEach(b => {
+      const c = [b.x + b.w / 2, b.y + b.h / 2];
+      const pxW = Math.hypot(...[0, 1].map(k => toImg(b.x + b.w, b.y)[k] - toImg(b.x, b.y)[k]));
+      const fs = Math.max(10, Math.min(base, pxW / 6));
+      edgeLabel([b.x, b.y], [b.x + b.w, b.y], c, 1, len(b.w), true, fs);
+      edgeLabel([b.x, b.y], [b.x, b.y + b.h], c, 1, len(b.h), true, fs);
+      const iw = b.w - 2 * mw, ih = b.h - 2 * mw;
+      if (iw > 0 && ih > 0) {
+        edgeLabel([b.x + mw, b.y + mw], [b.x + b.w - mw, b.y + mw], c, -1, len(iw), false, fs);
+        edgeLabel([b.x + mw, b.y + mw], [b.x + mw, b.y + b.h - mw], c, -1, len(ih), false, fs);
+      }
+    });
+  }
+
   function handlesFor(b) {
     // corners plus edge midpoints
     return [
@@ -255,7 +363,8 @@
     const u = $('units').value;
     if (mode !== 'boxes' || selected < 0) { $('sel').textContent = ''; return; }
     const b = boxes[selected];
-    $('sel').textContent = `Selected box: ${fmt(b.w)} × ${fmt(b.h)} ${u}, ` +
+    const mw = Math.max(0.05, num('mould'));
+    $('sel').textContent = `Selected box: outside ${fmt(b.w)} × ${fmt(b.h)} ${u}, inside ${fmt(b.w - 2 * mw)} × ${fmt(b.h - 2 * mw)} ${u}, ` +
       `${fmt(b.x)} ${u} from left wall edge, bottom ${fmt(Ht() - b.y - b.h)} ${u} above floor.`;
   }
 
@@ -269,6 +378,16 @@
   cv.addEventListener('pointerdown', e => {
     if (!img) return;
     const p = ptr(e), s = scaleFactor(), grab = 28 * s;
+    if (mode === 'mask') {
+      if (tool === 'brush') {
+        pushUndo(); drag = { type: 'brush', last: p }; stroke(p, p);
+      } else {
+        if (shape.length > 2 && dist(shape[0], p) < grab) finishShape();
+        else shape.push(p);
+      }
+      if (drag) cv.setPointerCapture(e.pointerId);
+      draw(); return;
+    }
     if (mode === 'corners') {
       let best = -1, bd = Infinity;
       corners.forEach((c, i) => { const d = dist(c, p); if (d < bd) { bd = d; best = i; } });
@@ -297,9 +416,12 @@
   });
 
   cv.addEventListener('pointermove', e => {
+    if (mode === 'mask' && img) { hover = ptr(e); if (!drag) { draw(); return; } }
     if (!drag) return;
     const p = ptr(e);
-    if (drag.type === 'corner') {
+    if (drag.type === 'brush') {
+      stroke(drag.last, p); drag.last = p;
+    } else if (drag.type === 'corner') {
       corners[drag.i] = [Math.max(0, Math.min(cv.width, p[0])), Math.max(0, Math.min(cv.height, p[1]))];
     } else {
       const [wx, wy] = toWall(p[0], p[1]);
@@ -339,20 +461,59 @@
   });
   const endDrag = () => { drag = null; };
   cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointerleave', () => { if (mode === 'mask' && !drag) { hover = null; draw(); } });
   cv.addEventListener('pointercancel', endDrag);
 
+  // ---------- furniture mask ----------
+  const brushR = () => (+$('brush').value / 1000) * Math.max(img.width, img.height) / 2;
+  function pushUndo() { undo.push(mctx.getImageData(0, 0, mask.width, mask.height)); if (undo.length > 25) undo.shift(); }
+  function maskOp() { mctx.globalCompositeOperation = act === 'hide' ? 'source-over' : 'destination-out'; mctx.fillStyle = mctx.strokeStyle = '#000'; }
+  function stroke(a, b) {
+    maskOp(); mctx.lineCap = mctx.lineJoin = 'round'; mctx.lineWidth = brushR() * 2;
+    mctx.beginPath(); mctx.moveTo(a[0], a[1]); mctx.lineTo(b[0] + 0.01, b[1]); mctx.stroke();
+  }
+  function finishShape() {
+    if (shape.length < 3) { shape = []; draw(); return; }
+    pushUndo(); maskOp();
+    mctx.beginPath(); shape.forEach(([x, y], i) => i ? mctx.lineTo(x, y) : mctx.moveTo(x, y)); mctx.closePath(); mctx.fill();
+    shape = []; draw();
+  }
+  function pick(on, off, setter) { $(on).classList.add('on'); $(off).classList.remove('on'); setter(); draw(); }
+  $('toolBrush').onclick = () => pick('toolBrush', 'toolShape', () => { tool = 'brush'; shape = []; setMode('mask'); });
+  $('toolShape').onclick = () => pick('toolShape', 'toolBrush', () => { tool = 'shape'; setMode('mask'); });
+  $('actHide').onclick = () => pick('actHide', 'actShow', () => { act = 'hide'; });
+  $('actShow').onclick = () => pick('actShow', 'actHide', () => { act = 'show'; });
+  $('finishShape').onclick = finishShape;
+  $('undoMask').onclick = () => { if (shape.length) shape.pop(); else if (undo.length) mctx.putImageData(undo.pop(), 0, 0); draw(); };
+  $('clearMask').onclick = () => { if (!mask) return; pushUndo(); mctx.clearRect(0, 0, mask.width, mask.height); shape = []; draw(); };
+  $('brush').addEventListener('input', () => draw());
+
   // ---------- ui ----------
+  const HELP = {
+    corners: 'Drag the four round handles onto the corners of the wall. If a corner is hidden, line the handle up with where the two edges would meet.',
+    boxes: 'Tap a box to select it. Drag inside to move it, or drag the handles to resize. Edges snap to line up with the other boxes.',
+    brush: 'Paint over furniture and anything else in front of the wall. Panels disappear behind it. Switch to "Bring panels back" to erase mistakes.',
+    shape: 'Tap around the edge of the furniture, then tap the first point (or Finish shape) to close it. Great for straight-edged pieces like sofas and dressers.',
+  };
   function setMode(m) {
     mode = m;
     $('modeCorners').classList.toggle('on', m === 'corners');
     $('modeBoxes').classList.toggle('on', m === 'boxes');
-    $('help').textContent = m === 'corners'
-      ? 'Drag the four round handles onto the corners of the wall. If a corner is hidden, line the handle up with where the two edges would meet.'
-      : 'Tap a box to select it. Drag inside to move it, or drag the handles to resize. Edges snap to line up with the other boxes.';
+    $('modeMask').classList.toggle('on', m === 'mask');
+    $('maskTools').style.display = m === 'mask' ? '' : 'none';
+    if (m !== 'mask') { shape = []; hover = null; }
+    $('help').textContent = HELP[m === 'mask' ? tool : m];
     draw();
   }
   $('modeCorners').onclick = () => setMode('corners');
   $('modeBoxes').onclick = () => setMode('boxes');
+  $('modeMask').onclick = () => setMode('mask');
+  $('toggleMeasure').onclick = () => {
+    showMeasure = !showMeasure;
+    $('toggleMeasure').textContent = showMeasure ? 'Hide measurements' : 'Show measurements';
+    $('toggleMeasure').classList.toggle('on', showMeasure);
+    draw();
+  };
   $('toggleOutline').onclick = () => {
     showOutline = !showOutline;
     $('toggleOutline').textContent = showOutline ? 'Hide outline' : 'Show outline';
@@ -390,6 +551,9 @@
       c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
       img = c;
       cv.width = c.width; cv.height = c.height;
+      layer.width = c.width; layer.height = c.height;
+      mask = document.createElement('canvas'); mask.width = c.width; mask.height = c.height;
+      mctx = mask.getContext('2d', { willReadFrequently: true }); undo = []; shape = [];
       const ix = c.width * 0.15, iy = c.height * 0.15;
       corners = [[ix, iy], [c.width - ix, iy], [c.width - ix, c.height - iy], [ix, c.height - iy]];
       updateH();
@@ -399,6 +563,7 @@
     im.src = url;
   });
 
+  window.addEventListener('resize', () => draw());
   draw();
 })();
 </script>
