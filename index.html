@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Wall Panel Preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Georgia, "Times New Roman", serif; background: #f4f1ec; color: #2b2b2b; }
+  header { padding: 10px 14px; background: #3e4a3d; color: #fff; }
+  header h1 { margin: 0; font-size: 18px; font-weight: normal; }
+  .wrap { display: flex; flex-wrap: wrap; gap: 12px; padding: 12px; }
+  .panel { background: #fff; border-radius: 8px; padding: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.15); }
+  .controls { flex: 0 0 300px; max-width: 100%; }
+  .stage { flex: 1 1 500px; min-width: 0; }
+  canvas { width: 100%; height: auto; display: block; touch-action: none; background: #ddd; border-radius: 4px; }
+  fieldset { border: 1px solid #ccc; border-radius: 6px; margin: 0 0 10px; padding: 8px 10px; }
+  legend { font-size: 14px; padding: 0 4px; }
+  label { display: flex; justify-content: space-between; align-items: center; font-size: 14px; margin: 5px 0; gap: 8px; }
+  input[type=number] { width: 80px; font-family: inherit; font-size: 14px; padding: 3px; }
+  button { font-family: inherit; font-size: 14px; padding: 6px 10px; margin: 3px 2px; border: 1px solid #3e4a3d; background: #fff; color: #3e4a3d; border-radius: 5px; cursor: pointer; }
+  button.primary, button.on { background: #3e4a3d; color: #fff; }
+  .hint { font-size: 13px; color: #555; margin: 6px 0; line-height: 1.35; }
+  .modes { margin-bottom: 8px; }
+  #sel { font-size: 13px; color: #333; min-height: 1.3em; }
+</style>
+</head>
+<body>
+<header><h1>Wall Panel Preview, angled walls</h1></header>
+<div class="wrap">
+  <div class="panel controls">
+    <fieldset>
+      <legend>1. Photo</legend>
+      <input type="file" id="file" accept="image/*">
+      <div class="hint">Take the photo from as far back as you can, without wide-angle mode, so the wall edges stay straight.</div>
+    </fieldset>
+
+    <fieldset>
+      <legend>2. Wall size (real measurements)</legend>
+      <label>Units
+        <select id="units"><option value="in">inches</option><option value="cm">cm</option></select>
+      </label>
+      <label>Width <input type="number" id="wallW" value="120" step="0.5"></label>
+      <label>Height <input type="number" id="wallH" value="96" step="0.5"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>3. Boxes</legend>
+      <label>Columns <input type="number" id="cols" value="3" min="1" step="1"></label>
+      <label>Rows <input type="number" id="rows" value="2" min="1" step="1"></label>
+      <label>Margin from edges <input type="number" id="margin" value="8" step="0.5"></label>
+      <label>Gap between boxes <input type="number" id="gap" value="6" step="0.5"></label>
+      <label>Bottom start height <input type="number" id="bottom" value="6" step="0.5"></label>
+      <label>Top stop height <input type="number" id="top" value="90" step="0.5"></label>
+      <label>Moulding width <input type="number" id="mould" value="1.5" step="0.25"></label>
+      <label>Moulding colour <input type="color" id="color" value="#ffffff"></label>
+      <label>Paint wall too <input type="checkbox" id="paint"></label>
+      <label>Wall paint colour <input type="color" id="wallColor" value="#8a9a86"></label>
+      <button class="primary" id="gen">Make box grid</button>
+      <div class="hint">Making the grid replaces any boxes you have adjusted.</div>
+    </fieldset>
+  </div>
+
+  <div class="panel stage">
+    <div class="modes">
+      <button id="modeCorners" class="on">Set wall corners</button>
+      <button id="modeBoxes">Adjust boxes</button>
+      <button id="addBox">Add box</button>
+      <button id="delBox">Delete box</button>
+      <button id="toggleOutline">Hide outline</button>
+      <button id="save">Save image</button>
+    </div>
+    <div class="hint" id="help">Drag the four round handles onto the corners of the wall. If a corner is hidden, line the handle up with where the two edges would meet.</div>
+    <canvas id="cv" width="1000" height="700"></canvas>
+    <div id="sel"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  let img = null;
+  let corners = null;      // image px: [TL, TR, BR, BL]
+  let boxes = [];          // wall units {x, y, w, h}, y measured from top
+  let mode = 'corners';
+  let showOutline = true;
+  let selected = -1;
+  let drag = null;
+  let H = null, Hinv = null;
+
+  // ---------- homography ----------
+  function solve(A, b) {
+    const n = b.length;
+    for (let i = 0; i < n; i++) {
+      let p = i;
+      for (let r = i + 1; r < n; r++) if (Math.abs(A[r][i]) > Math.abs(A[p][i])) p = r;
+      [A[i], A[p]] = [A[p], A[i]]; [b[i], b[p]] = [b[p], b[i]];
+      for (let r = i + 1; r < n; r++) {
+        const f = A[r][i] / A[i][i];
+        for (let c = i; c < n; c++) A[r][c] -= f * A[i][c];
+        b[r] -= f * b[i];
+      }
+    }
+    const x = new Array(n);
+    for (let i = n - 1; i >= 0; i--) {
+      let s = b[i];
+      for (let c = i + 1; c < n; c++) s -= A[i][c] * x[c];
+      x[i] = s / A[i][i];
+    }
+    return x;
+  }
+  function homography(src, dst) {
+    const A = [], b = [];
+    for (let i = 0; i < 4; i++) {
+      const [x, y] = src[i], [u, v] = dst[i];
+      A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+      A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+    }
+    const h = solve(A, b);
+    return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+  }
+  function apply(M, x, y) {
+    const w = M[6] * x + M[7] * y + M[8];
+    return [(M[0] * x + M[1] * y + M[2]) / w, (M[3] * x + M[4] * y + M[5]) / w];
+  }
+  function invert(m) {
+    const [a, b, c, d, e, f, g, h, i] = m;
+    const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+    const det = a * A + b * B + c * C;
+    return [A / det, -(b * i - c * h) / det, (b * f - c * e) / det,
+            B / det, (a * i - c * g) / det, -(a * f - c * d) / det,
+            C / det, -(a * h - b * g) / det, (a * e - b * d) / det];
+  }
+
+  const W = () => +$('wallW').value || 1;
+  const Ht = () => +$('wallH').value || 1;
+  const num = id => +$(id).value || 0;
+
+  function updateH() {
+    if (!corners) return;
+    H = homography([[0, 0], [W(), 0], [W(), Ht()], [0, Ht()]], corners);
+    Hinv = invert(H);
+  }
+  const toImg = (x, y) => apply(H, x, y);
+  const toWall = (x, y) => apply(Hinv, x, y);
+
+  // ---------- layout ----------
+  function makeGrid() {
+    const cols = Math.max(1, Math.round(num('cols')));
+    const rows = Math.max(1, Math.round(num('rows')));
+    const m = num('margin'), g = num('gap');
+    const topY = Ht() - num('top');       // convert heights from floor into y from top
+    const botY = Ht() - num('bottom');
+    const bw = (W() - 2 * m - (cols - 1) * g) / cols;
+    const bh = (botY - topY - (rows - 1) * g) / rows;
+    boxes = [];
+    if (bw <= 0 || bh <= 0) { alert('The boxes do not fit. Reduce the margin, gap, or number of boxes.'); return; }
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < cols; c++)
+        boxes.push({ x: m + c * (bw + g), y: topY + r * (bh + g), w: bw, h: bh });
+    selected = -1;
+    draw();
+  }
+
+  // ---------- drawing ----------
+  function quad(x0, y0, x1, y1) {
+    const p = [toImg(x0, y0), toImg(x1, y0), toImg(x1, y1), toImg(x0, y1)];
+    ctx.moveTo(p[0][0], p[0][1]);
+    for (let i = 1; i < 4; i++) ctx.lineTo(p[i][0], p[i][1]);
+    ctx.closePath();
+  }
+  function scaleFactor() { return cv.width / cv.getBoundingClientRect().width; }
+
+  function draw(forExport) {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    if (!img) {
+      ctx.fillStyle = '#666'; ctx.font = '28px Georgia'; ctx.textAlign = 'center';
+      ctx.fillText('Upload a photo of the wall to begin', cv.width / 2, cv.height / 2);
+      return;
+    }
+    ctx.drawImage(img, 0, 0);
+    updateH();
+    const s = scaleFactor();
+
+    if ($('paint').checked) {
+      ctx.save();
+      ctx.globalAlpha = 0.55; ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = $('wallColor').value;
+      ctx.beginPath(); quad(0, 0, W(), Ht()); ctx.fill();
+      ctx.restore();
+    }
+
+    const mw = Math.max(0.05, num('mould'));
+    boxes.forEach((b, i) => {
+      // shadow under moulding for a bit of depth
+      ctx.save();
+      ctx.beginPath();
+      quad(b.x, b.y, b.x + b.w, b.y + b.h);
+      quad(b.x + mw, b.y + mw, b.x + b.w - mw, b.y + b.h - mw);
+      ctx.shadowColor = 'rgba(0,0,0,0.35)';
+      ctx.shadowBlur = 4 * Math.max(1, img.width / 1500);
+      ctx.shadowOffsetY = 2 * Math.max(1, img.width / 1500);
+      ctx.fillStyle = $('color').value;
+      ctx.fill('evenodd');
+      ctx.restore();
+      if (!forExport && mode === 'boxes' && i === selected) {
+        ctx.save();
+        ctx.strokeStyle = '#e0533d'; ctx.lineWidth = 3 * s;
+        ctx.beginPath(); quad(b.x, b.y, b.x + b.w, b.y + b.h); ctx.stroke();
+        ctx.restore();
+      }
+    });
+
+    if (forExport) return;
+
+    if (showOutline || mode === 'corners') {
+      ctx.save();
+      ctx.strokeStyle = '#ffcc00'; ctx.lineWidth = 2 * s; ctx.setLineDash([10 * s, 6 * s]);
+      ctx.beginPath(); quad(0, 0, W(), Ht()); ctx.stroke();
+      ctx.restore();
+    }
+    if (mode === 'corners') {
+      corners.forEach(([x, y], i) => {
+        ctx.beginPath(); ctx.arc(x, y, 14 * s, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,204,0,0.35)'; ctx.fill();
+        ctx.lineWidth = 3 * s; ctx.strokeStyle = '#ffcc00'; ctx.stroke();
+        ctx.beginPath(); ctx.arc(x, y, 2.5 * s, 0, Math.PI * 2); ctx.fillStyle = '#000'; ctx.fill();
+      });
+    }
+    if (mode === 'boxes' && selected >= 0) {
+      handlesFor(boxes[selected]).forEach(h => {
+        const [x, y] = toImg(h.x, h.y);
+        ctx.beginPath(); ctx.arc(x, y, 10 * s, 0, Math.PI * 2);
+        ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 3 * s; ctx.strokeStyle = '#e0533d'; ctx.stroke();
+      });
+    }
+    showSel();
+  }
+
+  function handlesFor(b) {
+    // corners plus edge midpoints
+    return [
+      { k: 'tl', x: b.x, y: b.y }, { k: 'tr', x: b.x + b.w, y: b.y },
+      { k: 'br', x: b.x + b.w, y: b.y + b.h }, { k: 'bl', x: b.x, y: b.y + b.h },
+      { k: 't', x: b.x + b.w / 2, y: b.y }, { k: 'r', x: b.x + b.w, y: b.y + b.h / 2 },
+      { k: 'b', x: b.x + b.w / 2, y: b.y + b.h }, { k: 'l', x: b.x, y: b.y + b.h / 2 },
+    ];
+  }
+
+  function fmt(v) { return (Math.round(v * 4) / 4).toString(); }
+  function showSel() {
+    const u = $('units').value;
+    if (mode !== 'boxes' || selected < 0) { $('sel').textContent = ''; return; }
+    const b = boxes[selected];
+    $('sel').textContent = `Selected box: ${fmt(b.w)} × ${fmt(b.h)} ${u}, ` +
+      `${fmt(b.x)} ${u} from left wall edge, bottom ${fmt(Ht() - b.y - b.h)} ${u} above floor.`;
+  }
+
+  // ---------- pointer ----------
+  function ptr(e) {
+    const r = cv.getBoundingClientRect();
+    return [(e.clientX - r.left) * cv.width / r.width, (e.clientY - r.top) * cv.height / r.height];
+  }
+  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+  cv.addEventListener('pointerdown', e => {
+    if (!img) return;
+    const p = ptr(e), s = scaleFactor(), grab = 28 * s;
+    if (mode === 'corners') {
+      let best = -1, bd = Infinity;
+      corners.forEach((c, i) => { const d = dist(c, p); if (d < bd) { bd = d; best = i; } });
+      if (bd < grab * 2) drag = { type: 'corner', i: best };
+    } else {
+      if (selected >= 0) {
+        for (const h of handlesFor(boxes[selected])) {
+          if (dist(toImg(h.x, h.y), p) < grab) { drag = { type: 'handle', k: h.k }; break; }
+        }
+      }
+      if (!drag) {
+        const [wx, wy] = toWall(p[0], p[1]);
+        selected = -1;
+        for (let i = boxes.length - 1; i >= 0; i--) {
+          const b = boxes[i];
+          if (wx >= b.x && wx <= b.x + b.w && wy >= b.y && wy <= b.y + b.h) { selected = i; break; }
+        }
+        if (selected >= 0) {
+          const b = boxes[selected];
+          drag = { type: 'move', dx: wx - b.x, dy: wy - b.y };
+        }
+      }
+    }
+    if (drag) cv.setPointerCapture(e.pointerId);
+    draw();
+  });
+
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const p = ptr(e);
+    if (drag.type === 'corner') {
+      corners[drag.i] = [Math.max(0, Math.min(cv.width, p[0])), Math.max(0, Math.min(cv.height, p[1]))];
+    } else {
+      const [wx, wy] = toWall(p[0], p[1]);
+      const b = boxes[selected], min = 1;
+      if (drag.type === 'move') {
+        b.x = wx - drag.dx; b.y = wy - drag.dy;
+      } else {
+        const k = drag.k;
+        if (k.includes('l')) { const r = b.x + b.w; b.x = Math.min(wx, r - min); b.w = r - b.x; }
+        if (k.includes('r')) { b.w = Math.max(min, wx - b.x); }
+        if (k.includes('t')) { const bt = b.y + b.h; b.y = Math.min(wy, bt - min); b.h = bt - b.y; }
+        if (k.includes('b')) { b.h = Math.max(min, wy - b.y); }
+      }
+      // snap edges to other boxes so rows and columns line up
+      const snap = 0.75;
+      boxes.forEach((o, j) => {
+        if (j === selected) return;
+        for (const v of [o.x, o.x + o.w]) {
+          if (drag.type === 'move') { if (Math.abs(b.x - v) < snap) b.x = v; else if (Math.abs(b.x + b.w - v) < snap) b.x = v - b.w; }
+        }
+        for (const v of [o.y, o.y + o.h]) {
+          if (drag.type === 'move') { if (Math.abs(b.y - v) < snap) b.y = v; else if (Math.abs(b.y + b.h - v) < snap) b.y = v - b.h; }
+        }
+        if (drag.type === 'handle') {
+          if (Math.abs(b.w - o.w) < snap && /[lr]/.test(drag.k)) {
+            if (drag.k.includes('l')) b.x = b.x + b.w - o.w;
+            b.w = o.w;
+          }
+          if (Math.abs(b.h - o.h) < snap && /[tb]/.test(drag.k)) {
+            if (drag.k.includes('t')) b.y = b.y + b.h - o.h;
+            b.h = o.h;
+          }
+        }
+      });
+    }
+    draw();
+  });
+  const endDrag = () => { drag = null; };
+  cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointercancel', endDrag);
+
+  // ---------- ui ----------
+  function setMode(m) {
+    mode = m;
+    $('modeCorners').classList.toggle('on', m === 'corners');
+    $('modeBoxes').classList.toggle('on', m === 'boxes');
+    $('help').textContent = m === 'corners'
+      ? 'Drag the four round handles onto the corners of the wall. If a corner is hidden, line the handle up with where the two edges would meet.'
+      : 'Tap a box to select it. Drag inside to move it, or drag the handles to resize. Edges snap to line up with the other boxes.';
+    draw();
+  }
+  $('modeCorners').onclick = () => setMode('corners');
+  $('modeBoxes').onclick = () => setMode('boxes');
+  $('toggleOutline').onclick = () => {
+    showOutline = !showOutline;
+    $('toggleOutline').textContent = showOutline ? 'Hide outline' : 'Show outline';
+    draw();
+  };
+  $('gen').onclick = () => { makeGrid(); };
+  $('addBox').onclick = () => {
+    const w = W() / 4, h = Ht() / 4;
+    boxes.push({ x: (W() - w) / 2, y: (Ht() - h) / 2, w, h });
+    selected = boxes.length - 1; setMode('boxes');
+  };
+  $('delBox').onclick = () => {
+    if (selected >= 0) { boxes.splice(selected, 1); selected = -1; draw(); }
+  };
+  $('save').onclick = () => {
+    draw(true);
+    const a = document.createElement('a');
+    a.download = 'wall-panels.png';
+    a.href = cv.toDataURL('image/png');
+    a.click();
+    draw();
+  };
+  ['wallW', 'wallH', 'mould', 'color', 'paint', 'wallColor', 'units'].forEach(id => $(id).addEventListener('input', () => draw()));
+
+  $('file').addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    const im = new Image();
+    im.onload = () => {
+      // keep large photos manageable
+      const maxSide = 2400, sc = Math.min(1, maxSide / Math.max(im.width, im.height));
+      const c = document.createElement('canvas');
+      c.width = Math.round(im.width * sc); c.height = Math.round(im.height * sc);
+      c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+      img = c;
+      cv.width = c.width; cv.height = c.height;
+      const ix = c.width * 0.15, iy = c.height * 0.15;
+      corners = [[ix, iy], [c.width - ix, iy], [c.width - ix, c.height - iy], [ix, c.height - iy]];
+      updateH();
+      makeGrid();
+      setMode('corners');
+    };
+    im.src = url;
+  });
+
+  draw();
+})();
+</script>
+</body>
+</html>
