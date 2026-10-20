@@ -85,6 +85,7 @@
         <button id="finishShape">Finish shape</button>
         <button id="undoMask">Undo</button>
         <button id="clearMask">Clear all</button>
+        <button id="toggleTint">Hide red fill</button>
       </div>
     </div>
     <div class="hint" id="help">Drag the four round handles onto the corners of the wall. If a corner is hidden, line the handle up with where the two edges would meet.</div>
@@ -107,7 +108,7 @@
   let selected = -1;
   let drag = null;
   let H = null, Hinv = null;
-  let showMeasure = false;
+  let showMeasure = false, showTint = true;
   let mask = null, mctx = null;            // furniture mask, image px, opaque = panels hidden
   const layer = document.createElement('canvas'), lctx = layer.getContext('2d');
   let tool = 'brush', act = 'hide', shape = [], hover = null, undo = [];
@@ -270,7 +271,7 @@
       lctx.drawImage(mask, 0, 0);
       lctx.save(); lctx.globalCompositeOperation = 'source-in';
       lctx.fillStyle = '#e0533d'; lctx.fillRect(0, 0, layer.width, layer.height); lctx.restore();
-      ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(layer, 0, 0); ctx.restore();
+      if (showTint) { ctx.save(); ctx.globalAlpha = 0.35; ctx.drawImage(layer, 0, 0); ctx.restore(); }
       if (shape.length) {
         ctx.save(); ctx.strokeStyle = '#e0533d'; ctx.lineWidth = 3 * s; ctx.setLineDash([8 * s, 5 * s]);
         ctx.beginPath(); shape.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
@@ -495,6 +496,11 @@
   $('actHide').onclick = () => pick('actHide', 'actShow', () => { act = 'hide'; });
   $('actShow').onclick = () => pick('actShow', 'actHide', () => { act = 'show'; });
   $('finishShape').onclick = finishShape;
+  $('toggleTint').onclick = () => {
+    showTint = !showTint;
+    $('toggleTint').textContent = showTint ? 'Hide red fill' : 'Show red fill';
+    draw();
+  };
   $('undoMask').onclick = () => { if (shape.length) shape.pop(); else if (undo.length) mctx.putImageData(undo.pop(), 0, 0); draw(); };
   $('clearMask').onclick = () => { if (!mask) return; pushUndo(); mctx.clearRect(0, 0, mask.width, mask.height); shape = []; draw(); };
   $('brush').addEventListener('input', () => draw());
