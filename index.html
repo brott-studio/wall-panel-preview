@@ -206,7 +206,13 @@
   }
   function scaleFactor() { return cv.width / cv.getBoundingClientRect().width; }
 
+  function syncFinish() {
+    const b = $('finishShape'); if (!b) return;
+    const ok = tool === 'shape' && shape.length >= 3;
+    b.disabled = !ok; b.style.opacity = ok ? '' : '0.4'; b.style.cursor = ok ? '' : 'default';
+  }
   function draw(forExport) {
+    syncFinish();
     ctx.clearRect(0, 0, cv.width, cv.height);
     if (!img) {
       ctx.fillStyle = '#666'; ctx.font = '28px Georgia'; ctx.textAlign = 'center';
@@ -473,13 +479,7 @@
     mctx.beginPath(); mctx.moveTo(a[0], a[1]); mctx.lineTo(b[0] + 0.01, b[1]); mctx.stroke();
   }
   function finishShape() {
-    if (tool !== 'shape' || shape.length < 3) {
-      $('help').textContent = tool !== 'shape'
-        ? 'Finish shape is for the Outline shape tool. Tap "Outline shape", then tap at least 3 points around the furniture.'
-        : 'Tap at least 3 points around the furniture first, then press Finish shape.';
-      $('help').style.color = '#b0361f';
-      return;
-    }
+    if (tool !== 'shape' || shape.length < 3) return;   // button is greyed out in these cases
     $('help').style.color = '';
     pushUndo(); maskOp();
     mctx.beginPath(); shape.forEach(([x, y], i) => i ? mctx.lineTo(x, y) : mctx.moveTo(x, y)); mctx.closePath(); mctx.fill();
@@ -504,7 +504,7 @@
     corners: 'Drag the four round handles onto the corners of the wall. If a corner is hidden, line the handle up with where the two edges would meet.',
     boxes: 'Tap a box to select it. Drag inside to move it, or drag the handles to resize. Edges snap to line up with the other boxes.',
     brush: 'Paint over furniture and anything else in front of the wall. Panels disappear behind it. Switch to "Bring panels back" to erase mistakes.',
-    shape: 'Tap around the edge of the furniture, then tap the first point (or Finish shape) to close it. Great for straight-edged pieces like sofas and dressers.',
+    shape: 'Tap points around the edge of the furniture. Close the shape by tapping the first point again, or press Finish shape. You only need one of the two. Great for straight-edged pieces like sofas and dressers.',
   };
   function setMode(m) {
     mode = m;
