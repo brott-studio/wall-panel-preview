@@ -473,10 +473,21 @@
     mctx.beginPath(); mctx.moveTo(a[0], a[1]); mctx.lineTo(b[0] + 0.01, b[1]); mctx.stroke();
   }
   function finishShape() {
-    if (shape.length < 3) { shape = []; draw(); return; }
+    if (tool !== 'shape' || shape.length < 3) {
+      $('help').textContent = tool !== 'shape'
+        ? 'Finish shape is for the Outline shape tool. Tap "Outline shape", then tap at least 3 points around the furniture.'
+        : 'Tap at least 3 points around the furniture first, then press Finish shape.';
+      $('help').style.color = '#b0361f';
+      return;
+    }
+    $('help').style.color = '';
     pushUndo(); maskOp();
     mctx.beginPath(); shape.forEach(([x, y], i) => i ? mctx.lineTo(x, y) : mctx.moveTo(x, y)); mctx.closePath(); mctx.fill();
-    shape = []; draw();
+    shape = [];
+    $('help').textContent = act === 'hide'
+      ? 'Shape added. Panels are now hidden behind it. Outline another piece, or switch tools.'
+      : 'Shape added. Panels inside it are back.';
+    draw();
   }
   function pick(on, off, setter) { $(on).classList.add('on'); $(off).classList.remove('on'); setter(); draw(); }
   $('toolBrush').onclick = () => pick('toolBrush', 'toolShape', () => { tool = 'brush'; shape = []; setMode('mask'); });
@@ -502,7 +513,8 @@
     $('modeMask').classList.toggle('on', m === 'mask');
     $('maskTools').style.display = m === 'mask' ? '' : 'none';
     if (m !== 'mask') { shape = []; hover = null; }
-    $('help').textContent = HELP[m === 'mask' ? tool : m];
+    $('help').textContent = HELP[m === 'mask' ? tool : m]; $('help').style.color = '';
+    $('finishShape').style.display = tool === 'shape' ? '' : 'none';
     draw();
   }
   $('modeCorners').onclick = () => setMode('corners');
